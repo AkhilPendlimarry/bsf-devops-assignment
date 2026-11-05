@@ -39,3 +39,53 @@ curl.exe -k -sS -D - -o NUL https://localhost:8443/wp-admin/
 - **Files Changed:**
 1. edge/nginx.conf
 2. web/default.conf
+
+## Issue 3: Intermittent 502 gateway on SaaS application
+
+- **Symptom:** The Next.js application at `https://localhost:8443/app` intermittently returned 502 Bad Gateway. Refreshing the page sometimes worked and sometimes failed.
+
+- **How I found it:**
+  1. Inspected the Edge Nginx upstream configuration:
+   ## Get-Content .\edge\nginx.conf
+    
+  2. Inspected the application port configuration in Docker Compose:
+    ## Get-Content .\docker-compose.yml
+
+  3. Checked the port configured inside app1:
+
+    ## docker compose exec app1 sh -c "echo APP1; printenv PORT; wget -qO- http://127.0.0.1:3000/app/api/health"
+     App1 returned a successful health response on port 3000.
+
+  4. Checked the port configured inside app2:
+
+    ## docker compose exec app2 sh -c "echo APP2; printenv PORT; wget -qO- http://127.0.0.1:3000/app/api/health"
+     App2 showed `PORT=3001`, but the health request to port 3000 returned connection refused.
+
+  5. Compared the application ports with the Nginx upstream configuration and identified the mismatch.
+
+- **Root cause:** Edge Nginx was configured to forward requests to both `app1:3000` and `app2:3000`. However, Docker Compose configured app2 to listen on port 3001. Since Nginx distributed requests between both instances, requests sent to app2 on port 3000 failed and resulted in intermittent 502 responses.
+
+- **Fix:** Updated the app2 upstream port in `edge/nginx.conf` from `3000` to `3001`, matching its Docker Compose configuration.
+
+  **Before:**
+  ```nginx
+  upstream saas_app {
+      server app1:3000;
+      server app2:3000;
+  }
+  ```
+
+  **After:**
+  ```nginx
+  upstream saas_app {
+      server app1:3000;
+      server app2:3001;
+  }
+  ```
+
+- **Verification:** Tested the app1 and app2 health endpoints on their respective ports and tested repeated requests through the Edge Nginx proxy to confirm that the application no longer intermittently returned 502.
+
+- **Prevention:** Keep load-balancer upstream ports aligned with the actual application listening ports. Validate backend health and test repeated requests through the load balancer after configuration changes.
+
+- **Files changed:**
+  1. edge/nginx.conf
