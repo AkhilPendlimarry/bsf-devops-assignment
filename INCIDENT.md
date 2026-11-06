@@ -371,6 +371,8 @@ This can hide genuine backup failures.
 We inspected the original script and identified the unconditional error suppression.
 Authentication, permission and network failures have not yet been deliberately reproduced.
 
+**Suggested resolution:**
+Check whether the bucket exists before attempting to create it. Handle the already-exists condition separately, but allow authentication, network and permission errors to fail the backup job.
 
 ### 8.6. Hardcoded credentials
 
@@ -394,8 +396,8 @@ Anyone with repository access can read these values. Credential rotation also re
 **How we investigated it:**
 We inspected the backup script and Docker Compose configuration and confirmed that the credentials are literal values.
 
-
-Previously exposed credentials should also be rotated.
+**Suggested resolution:**
+Move credentials to environment variables or a secrets-management mechanism. Keep the local `.env` file out of Git and provide a `.env.example` with placeholders. Rotate credentials that were exposed. Previously exposed credentials should also be rotated.
 
 ### 8.7. No automated nightly schedule
 The Docker Compose comment describes the backup as a nightly job:
@@ -425,6 +427,8 @@ Therefore, the configuration does not establish an automated nightly backup sche
 **How we investigated it:**
 We inspected the backup service configuration and found that it is under the `jobs` profile and is manually invoked.
 
+**Suggested resolution:**
+Configure a scheduler such as cron or an equivalent scheduled execution mechanism if nightly backups are required. Otherwise, clearly document that the job is manually triggered.
 
 ### Overall Investigation Status
 
@@ -437,3 +441,142 @@ Finding - Investigation status
 6. Hardcoded credentials - Confirmed by source inspection 
 7. No automated nightly schedule - Confirmed by Compose configuration inspection 
 
+
+######
+-----  Security findings report  ---------
+######
+
+## Issue 9: Sensitive configuration and debug files publicly accessible
+Severity: High
+
+Affected files/endpoints:
+- /var/www/html/.env
+- /var/www/html/wp-content/debug.log
+
+# Discovery and evidence:
+During security testing, the following requests were made:
+Endpoint	Before remediation
+https://localhost:8443/.env	200
+https://localhost:8443/wp-content/debug.log	200
+https://localhost:8443/.git/config	403
+https://localhost:8443/wp-config.php	200
+
+The .env response exposed the database credential:
+DB_PASSWORD=wp-db-pass-2026
+
+The wp-config.php response returned HTTP 200, but further inspection did not find PHP source code or the database password in its response body. Therefore, this is not recorded as confirmed source-code disclosure.
+
+# Root cause:
+The Nginx web server was serving files from /var/www/html, which also contained sensitive environment and debug files. There were no explicit access restrictions for these files.
+
+# Remediation implemented:
+Added a hidden-file access restriction in web/default.conf:
+location ~ /\.(?!well-known).* {
+    deny all;
+    access_log off;
+    log_not_found off;
+}
+
+Added an explicit restriction for the WordPress debug log:
+location = /wp-content/debug.log {
+    deny all;
+    access_log off;
+    log_not_found off;
+}
+
+# Post-remediation validation:
+Endpoint	After remediation
+/.env	403
+/wp-content/debug.log	403
+/.git/config	403
+Homepage /	200
+/wp-config.php	200, no PHP source marker or password detected
+
+# Status 
+ - Access restrictions implemented and verified.
+
+# Suggestions: 
+Rotate the database password exposed through .env. Blocking the file does not invalidate the previously exposed credential.
+
+## Issue 10: Redis exposed without authentication
+Severity: High
+
+# Discovery and evidence:
+The Redis configuration and Docker Compose service were inspected.
+Findings:
+- Redis listened on 0.0.0.0:6379.
+- Docker Compose published port 6379 on all host interfaces.
+- requirepass was not configured.
+- WordPress connected to Redis using the hostname redis and port 6379.
+Redis responded to unauthenticated commands:
+PING
+PONG
+
+# Root cause:
+Redis was configured without authentication and its port was unnecessarily exposed outside the Docker network.
+
+# Recommended remediation:
+1. Remove the host port mapping from the Redis Compose service.
+2. Enable Redis authentication.
+3. Configure WordPress to use the same Redis password.
+4. Recreate only the Redis container and verify the WordPress object cache.
+# Status:
+ Open — remediation not yet applied.
+
+## Issue 11: MinIO console exposed on host interface
+Severity: Medium — requires further assessment
+
+# Discovery and evidence:
+
+Docker Compose published the MinIO console:
+ports:
+  - "9001:9001"
+
+The console endpoint responded with HTTP 200:
+http://localhost:9001/
+
+MinIO root credentials were also hardcoded in Docker Compose:
+MINIO_ROOT_USER: bsfadmin
+MINIO_ROOT_PASSWORD: bsf-s3-root-secret
+
+
+# Root cause:
+The MinIO administrative console is published on the host interface, and administrative credentials are embedded in the Compose configuration.
+
+# Recommended remediation:
+- Restrict the console to localhost if it is needed only for local development.
+- Otherwise, remove the published console port.
+- Move credentials into environment variables or a secrets-management mechanism.
+- Verify that anonymous access to backup objects is denied.
+# Important: HTTP 200 from the console does not prove authentication bypass. We have not established that MinIO permits unauthenticated administrative access.
+
+# Status: Exposure confirmed; authentication bypass not established; remediation pending.
+
+## Issue 12: Hardcoded credentials in project configuration
+# Severity: High
+
+# Discovery and evidence:
+Credentials were found in:
+- docker-compose.yml
+- backup/backup.sh
+- scripts/setup.sh
+Examples include:
+- MariaDB root password.
+- WordPress database password.
+- MinIO root password.
+- WordPress administrator password.
+The database password was also exposed through the publicly accessible .env file.
+
+# Root cause:
+Credentials are stored as literal values in source-controlled configuration and shell scripts.
+
+# Impact:
+Anyone with repository access can read these credentials. Exposed credentials may be reused to access the database or storage service.
+
+# Recommended remediation:
+- Move secrets into a local .env file excluded from Git.
+- Add .env.example with placeholders.
+- Rotate credentials already exposed.
+- Avoid printing passwords in setup logs.
+- Use dedicated least-privilege accounts instead of root accounts wherever possible.
+# Status: Confirmed; remediation and credential rotation pending.
