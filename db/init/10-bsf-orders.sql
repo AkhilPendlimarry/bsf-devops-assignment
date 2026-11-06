@@ -28,3 +28,7 @@ SELECT
     REPEAT('x', 120),
     DATE_SUB('2026-10-01 00:00:00', INTERVAL (n % 730) DAY)
 FROM seq;
+
+-- Improve customer order lookup performance.
+CREATE INDEX idx_customer_email_created_at
+ON wp_bsf_orders (customer_email, created_at);
